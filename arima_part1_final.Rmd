@@ -45,8 +45,6 @@ The data are imported from the CSV files downloaded from the INSEE databank.
 The zip archive is automatically extracted if the files are not already present.
 
 ```{r import-data}
-setwd("C:/Users/HP/Documents/serie temp projet/serie_010767589_05042026")
-
 data_file <- "valeurs_mensuelles.csv"
 meta_file <- "caractéristiques.csv"
 
