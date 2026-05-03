@@ -1,15 +1,17 @@
 ---
 
-editor_options: 
-  markdown: 
-    wrap: 72
----
-
-------------------------------------------------------------------------
-
 title: "ARIMA Modelling of a French Industrial Production Index"
 
-output: html_notebook: toc: true toc_float: true toc_depth: 3 theme: flatly highlight: tango number_sections: true ---
+
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
@@ -31,7 +33,7 @@ library(forecast)
 library(urca)
 ```
 
-------------------------------------------------------------------------
+---
 
 # Part I – The Data
 
@@ -39,7 +41,8 @@ library(urca)
 
 ### Importing the data
 
-The data are imported from the CSV files downloaded from the INSEE databank. The zip archive is automatically extracted if the files are not already present.
+The data are imported from the CSV files downloaded from the INSEE databank.
+The zip archive is automatically extracted if the files are not already present.
 
 ```{r import-data}
 data_file <- "valeurs_mensuelles.csv"
@@ -122,15 +125,28 @@ cat("Period:", format(time(Y)[1]), "to", format(time(Y)[T]), "\n")
 
 ### Description
 
-The selected series is the **Industrial Production Index (IPI), seasonally and working-day adjusted (CVS-CJO)**, for the sector *"Autres industries extractives"* (NAF revision 2, **division 08**). This division covers the extraction of non-energy minerals such as stone, sand, gravel, chalk, clay, and salt.
+The selected series is the **Industrial Production Index (IPI), seasonally and
+working-day adjusted (CVS-CJO)**, for the sector *"Autres industries
+extractives"* (NAF revision 2, **division 08**). This division covers the
+extraction of non-energy minerals such as stone, sand, gravel, chalk, clay,
+and salt.
 
-The sample runs from `r raw$period[1]` to `r raw$period[nrow(raw)]`, yielding **`r T` monthly observations** — well above the 100-observation minimum required by the assignment. There are **no missing values** in the sample.
+The sample runs from `r raw$period[1]` to `r raw$period[nrow(raw)]`, yielding
+**`r T` monthly observations** — well above the 100-observation minimum
+required by the assignment. There are **no missing values** in the sample.
 
-**Seasonal adjustment.** The CVS-CJO correction is applied upstream by INSEE, so the series is already free of seasonal fluctuations and calendar effects. No additional seasonal decomposition is needed.
+**Seasonal adjustment.** The CVS-CJO correction is applied upstream by INSEE,
+so the series is already free of seasonal fluctuations and calendar effects.
+No additional seasonal decomposition is needed.
 
-**Logarithmic transformation.** The series is strictly positive, so a log transformation is technically feasible. We apply it for two reasons: (i) it stabilises the variance if the latter scales with the level, and (ii) after first-differencing, $X_t = \Delta \log Z_t$ is directly interpretable as an approximate monthly growth rate of industrial production. We verify the relevance of this choice in Question 2 through formal stationarity tests.
+**Logarithmic transformation.** The series is strictly positive, so a log
+transformation is technically feasible. We apply it for two reasons: (i) it
+stabilises the variance if the latter scales with the level, and (ii) after
+first-differencing, $X_t = \Delta \log Z_t$ is directly interpretable as an
+approximate monthly growth rate of industrial production. We verify the
+relevance of this choice in Question 2 through formal stationarity tests.
 
-------------------------------------------------------------------------
+---
 
 ## Question 2 – Transformation toward stationarity
 
@@ -140,7 +156,8 @@ We apply the log transformation followed by a first difference:
 
 $$X_t = \Delta \log Z_t = \log Z_t - \log Z_{t-1}$$
 
-where $Z_t$ is the original IPI. The series $X_t$ represents the approximate monthly growth rate of industrial production (in log points).
+where $Z_t$ is the original IPI. The series $X_t$ represents the approximate
+monthly growth rate of industrial production (in log points).
 
 ```{r transformation}
 log_Y <- log(Y)          # log-level
@@ -174,7 +191,10 @@ rbind(
 )
 ```
 
-The original index shows a large gap between the first-half mean (\~110) and the second-half mean (\~85), confirming a persistent downward drift. After the log and first difference, the two half-sample means are close to zero and the standard deviations are similar — a first indication that $X_t$ is stationary.
+The original index shows a large gap between the first-half mean (~110) and the
+second-half mean (~85), confirming a persistent downward drift. After the log
+and first difference, the two half-sample means are close to zero and the
+standard deviations are similar — a first indication that $X_t$ is stationary.
 
 ### Formal unit-root tests — raw log-level series
 
@@ -193,11 +213,15 @@ kpss.test(log_Y, null = "Trend")
 
 **Interpretation:**
 
-- **ADF:** the unit-root null *cannot* be rejected (p-value \> 0.05) — the log-level series is consistent with an integrated process.
-- **KPSS (level):** level-stationarity is *strongly rejected* (p-value \< 0.01).
-- **KPSS (trend):** trend-stationarity is *also rejected*, ruling out a purely deterministic trend as the sole source of non-stationarity.
+- **ADF:** the unit-root null *cannot* be rejected (p-value > 0.05) — the
+  log-level series is consistent with an integrated process.
+- **KPSS (level):** level-stationarity is *strongly rejected* (p-value < 0.01).
+- **KPSS (trend):** trend-stationarity is *also rejected*, ruling out a purely
+  deterministic trend as the sole source of non-stationarity.
 
-The log-level series contains a **stochastic trend (unit root)**. Correcting a deterministic trend alone would not be sufficient; first differencing is the appropriate transformation.
+The log-level series contains a **stochastic trend (unit root)**. Correcting a
+deterministic trend alone would not be sufficient; first differencing is the
+appropriate transformation.
 
 ### Formal unit-root tests — differenced series $X_t$
 
@@ -213,12 +237,16 @@ kpss.test(X, null = "Level")
 
 **Interpretation:**
 
-- **ADF:** the unit-root null is *strongly rejected* (p-value \< 0.01) — $X_t$ is stationary.
-- **KPSS:** level-stationarity is *not rejected* (p-value \> 0.05), confirming stationarity.
+- **ADF:** the unit-root null is *strongly rejected* (p-value < 0.01) — $X_t$
+  is stationary.
+- **KPSS:** level-stationarity is *not rejected* (p-value > 0.05), confirming
+  stationarity.
 
-Both tests agree: **one differencing of the log is sufficient**. We set **d = 1** and do not difference further, as over-differencing would inflate the variance and induce unnecessary MA components in the model.
+Both tests agree: **one differencing of the log is sufficient**. We set
+**d = 1** and do not difference further, as over-differencing would inflate the
+variance and induce unnecessary MA components in the model.
 
-------------------------------------------------------------------------
+---
 
 ## Question 3 – Graphical representation before and after transformation
 
@@ -251,7 +279,9 @@ plot(log_Y,
 grid()
 ```
 
-The log transformation compresses extreme values and will make the first difference interpretable as a growth rate, but it does not remove the downward trend — this series remains non-stationary.
+The log transformation compresses extreme values and will make the first
+difference interpretable as a growth rate, but it does not remove the downward
+trend — this series remains non-stationary.
 
 ### ACF and PACF of the log-level series
 
@@ -262,7 +292,9 @@ pacf(log_Y, lag.max = 48, main = "PACF – log-level log(Zt)")
 par(mfrow = c(1, 1))
 ```
 
-The ACF decays extremely slowly and remains significant over many lags — a textbook signature of a unit root. The PACF cuts off sharply after lag 1, typical of an AR(1)-like integrated process.
+The ACF decays extremely slowly and remains significant over many lags — a
+textbook signature of a unit root. The PACF cuts off sharply after lag 1,
+typical of an AR(1)-like integrated process.
 
 ### Differenced series $X_t = \Delta \log Z_t$
 
@@ -290,25 +322,43 @@ pacf(X, lag.max = 36, main = "PACF – differenced series Xt")
 par(mfrow = c(1, 1))
 ```
 
-**Comments.** After the log-difference transformation, the series oscillates around zero with no visible trend. Variance is roughly stable over time, with slightly higher volatility around the 2008–2009 financial crisis and the 2020 Covid-19 shock — episodic events that do not invalidate stationarity. The ACF of $X_t$ drops quickly to near zero, and the PACF shows only one or two significant spikes, consistent with a **low-order stationary ARMA process**. This confirms that $X_t$ is ready for ARMA modelling in Part II.
+**Comments.** After the log-difference transformation, the series oscillates
+around zero with no visible trend. Variance is roughly stable over time, with
+slightly higher volatility around the 2008–2009 financial crisis and the 2020
+Covid-19 shock — episodic events that do not invalidate stationarity. The ACF
+of $X_t$ drops quickly to near zero, and the PACF shows only one or two
+significant spikes, consistent with a **low-order stationary ARMA process**.
+This confirms that $X_t$ is ready for ARMA modelling in Part II.
 
-------------------------------------------------------------------------
+---
 
 ## Conclusion of Part I
 
-The selected INSEE series satisfies all assignment requirements: it is a French monthly aggregate IPI, seasonally and working-day adjusted, with **`r T` observations** and no missing values. The series contains a stochastic trend confirmed by ADF and KPSS tests, so we apply a log transformation followed by a first difference. The working series for the rest of the assignment is:
+The selected INSEE series satisfies all assignment requirements: it is a French
+monthly aggregate IPI, seasonally and working-day adjusted, with
+**`r T` observations** and no missing values. The series contains a stochastic
+trend confirmed by ADF and KPSS tests, so we apply a log transformation
+followed by a first difference. The working series for the rest of the
+assignment is:
 
 $$\boxed{X_t = \Delta \log Z_t = \log Z_t - \log Z_{t-1}}$$
 
-This series is interpreted as the monthly growth rate of industrial production in the Other Mining and Quarrying sector, and its stationarity has been verified both graphically and through formal unit-root tests.
+This series is interpreted as the monthly growth rate of industrial production
+in the Other Mining and Quarrying sector, and its stationarity has been
+verified both graphically and through formal unit-root tests.
 
-------------------------------------------------------------------------
+---
 
 ## Part II — ARIMA Grid Search (Box‑Jenkins)
 
-We now run a full grid search over ARMA orders using the working series `X` (the first-differenced log series defined above). The grid covers p = 0..5 and q = 0..2 and uses `d = 0` because `X` is already a first difference of the log-level.
+We now run a full grid search over ARMA orders using the working series `X` (the
+first-differenced log series defined above). The grid covers p = 0..5 and q = 0..2
+and uses `d = 0` because `X` is already a first difference of the log-level.
 
 ```{r arima-grid, echo=TRUE}
+
+
+
 # Parameters
 p_max <- 5
 q_max <- 2
@@ -380,57 +430,29 @@ for (p in 0:p_max) {
   }
 }
 
-# 1. On garde UNIQUEMENT les modèles valides selon Box-Jenkins
-# (Derniers coeffs significatifs ET résidus blancs)
-modeles_valides <- res_df[res_df$valid_coeffs == TRUE & res_df$white_resid == TRUE & res_df$converged == TRUE, ]
-
-# 2. On trie ces modèles survivants par le BIC (du plus petit au plus grand)
-modeles_valides <- modeles_valides[order(modeles_valides$BIC), ]
+res_df <- do.call(rbind, results)
+res_df$valid_coeffs <- with(res_df, (is.na(last_ar_pval) | last_ar_pval < 0.05) & (is.na(last_ma_pval) | last_ma_pval < 0.05))
+res_df$white_resid <- res_df$ljung_pval > 0.05
+res_df <- res_df[order(res_df$AIC), ]
 
 write.csv(res_df, file = "arima_grid_results_X.csv", row.names = FALSE)
 
-cat("\n=== TOP MODÈLES VALIDES (Classés par BIC) ===\n")
-print(head(modeles_valides, 5))
+cat("\nTop models by AIC:\n")
+print(head(res_df, 10))
 
-# 3. Le grand gagnant est la première ligne de ce tableau trié !
-best_row <- modeles_valides[1, ]
-cat(sprintf("\n🏆 Le grand vainqueur Box-Jenkins est : ARMA(%d, %d)\n", best_row$p, best_row$q))
+best_row <- res_df[1, ]
+cat(sprintf("\nBest model by AIC: ARIMA(%d,%d,%d)\n", best_row$p, 0, best_row$q))
 
 if (!is.na(best_row$AIC)) {
   best_fit <- tryCatch({ stats::arima(y_series, order = c(best_row$p, 0, best_row$q), method = "ML") }, error = function(e) NULL)
   if (!is.null(best_fit)) saveRDS(best_fit, file = "best_arima_X.rds")
 }
+
+cat("\nSaved results to arima_grid_results_X.csv and best_arima_X.rds (if estimated).\n")
 ```
 
-------------------------------------------------------------------------
 
-```{r arima-grid, echo=TRUE}
-# Assure-toi d'avoir le package forecast
-library(forecast)
 
-# 1. On estime le modèle gagnant
-# (Note: dy = série X_t, log_Z = série logarithmique avant différenciation)
-best_model <- Arima(X, order=c(0,0,2))
-
-# 2. Graphique des résidus (fig5_residuals_acf.png)
-checkresiduals(best_model)
-# -> Sauvegarde l'image qui s'affiche sous le nom "fig5_residuals_acf.png"
-
-# 3. Prévision sur la série originale (fig7_forecast.png)
-# Astuce de pro : On lance l'ARIMA(0,1,2) directement sur le Log(Zt)
-# R va s'occuper d'inverser la différenciation tout seul pour tracer la courbe !
-log_Z <- log(z) # (ta série de base passée au log)
-forecast_model <- Arima(log_Z, order=c(0,1,2))
-
-# On prévoit 24 mois (h=24)
-my_forecast <- forecast(forecast_model, h=24)
-
-# On dessine le joli graphique (autoplot fait des graphiques style ggplot très propres)
-autoplot(my_forecast) + 
-  ylab("Log(Industrial Production Index)") + 
-  xlab("Years") +
-  ggtitle("24-Month Forecast - ARIMA(0,1,2)")
-# -> Sauvegarde l'image qui s'affiche sous le nom "fig7_forecast.png"
-```
+---
 
 *End of Part I*
