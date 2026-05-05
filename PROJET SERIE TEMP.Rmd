@@ -1,0 +1,785 @@
+---
+
+title: "ARIMA Modelling of a French Industrial Production Index"
+
+
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width  = 9,
+  fig.height = 5
+)
+```
+
+```{r packages}
+pkgs <- c("tseries", "forecast", "urca", "lmtest")
+for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+
+library(tseries)
+library(forecast)
+library(urca)
+library(lmtest)
+```
+
+---
+
+# Part I – The Data
+
+## Question 1 – Description of the selected series
+
+### Importing the data
+
+The data are imported from the CSV files downloaded from the INSEE databank.
+The zip archive is automatically extracted if the files are not already present.
+
+```{r import-data}
+data_file <- "valeurs_mensuelles.csv"
+meta_file <- "caractéristiques.csv"
+
+
+# Verification
+if (!file.exists(data_file)) stop("valeurs_mensuelles.csv not found")
+if (!file.exists(meta_file)) stop("caractéristiques.csv not found")
+
+
+# --- Metadata ---
+metadata <- read.csv(
+  meta_file,
+  sep = ";", header = TRUE, nrows = 1,
+  fileEncoding = "UTF-8-BOM", stringsAsFactors = FALSE,
+  colClasses = "character", check.names = FALSE
+)
+names(metadata) <- sub("^\ufeff", "", names(metadata))
+
+# --- Series values ---
+raw <- read.csv(
+  data_file,
+  sep = ";", header = FALSE, skip = 4,
+  fileEncoding = "UTF-8-BOM", stringsAsFactors = FALSE,
+  colClasses = "character"
+)
+names(raw) <- c("period", "value", "code")
+raw <- raw[grepl("^[0-9]{4}-[0-9]{2}$", raw$period), ]
+raw$value <- as.numeric(gsub(",", ".", raw$value))
+raw$date  <- as.Date(paste0(raw$period, "-01"))
+raw       <- raw[order(raw$date), ]
+
+head(raw, 3)
+tail(raw, 3)
+```
+
+### Dynamic summary table
+
+```{r summary-table}
+summary_table <- data.frame(
+  Attribute = c("idBank", "Indicator", "Activity", "Correction",
+                "Geography", "Base", "Frequency",
+                "Start", "End", "Observations", "Missing values",
+                "Min", "Mean", "Max"),
+  Value = c(
+    metadata$idBank,
+    metadata$Indicateur,
+    metadata$Activité,
+    metadata$Correction,
+    metadata$`Zone géographique`,
+    metadata$`Base de l'indice`,
+    metadata$Périodicité,
+    raw$period[1],
+    raw$period[nrow(raw)],
+    as.character(nrow(raw)),
+    as.character(sum(is.na(raw$value))),
+    as.character(round(min(raw$value,  na.rm = TRUE), 2)),
+    as.character(round(mean(raw$value, na.rm = TRUE), 2)),
+    as.character(round(max(raw$value,  na.rm = TRUE), 2))
+  )
+)
+
+summary_table
+```
+
+### Build the `ts` object
+
+```{r build-ts}
+start_year  <- as.integer(format(raw$date[1], "%Y"))
+start_month <- as.integer(format(raw$date[1], "%m"))
+
+Y <- ts(raw$value,
+        start     = c(start_year, start_month),
+        frequency = 12)
+
+T <- length(Y)
+cat("Series length  T =", T, "observations\n")
+cat("Period:", format(time(Y)[1]), "to", format(time(Y)[T]), "\n")
+```
+
+### Description
+
+The selected series is the **Industrial Production Index (IPI), seasonally and
+working-day adjusted (CVS-CJO)**, for the sector *"Autres industries
+extractives"* (NAF revision 2, **division 08**). This division covers the
+extraction of non-energy minerals such as stone, sand, gravel, chalk, clay,
+and salt.
+
+The sample runs from `r raw$period[1]` to `r raw$period[nrow(raw)]`, yielding
+**`r T` monthly observations** — well above the 100-observation minimum
+required by the assignment. There are **no missing values** in the sample.
+
+**Seasonal adjustment.** The CVS-CJO correction is applied upstream by INSEE,
+so the series is already free of seasonal fluctuations and calendar effects.
+No additional seasonal decomposition is needed.
+
+**Logarithmic transformation.** The series is strictly positive, so a log
+transformation is technically feasible. We apply it for two reasons: (i) it
+stabilises the variance if the latter scales with the level, and (ii) after
+first-differencing, $X_t = \Delta \log Z_t$ is directly interpretable as an
+approximate monthly growth rate of industrial production. We verify the
+relevance of this choice in Question 2 through formal stationarity tests.
+
+---
+
+## Question 2 – Transformation toward stationarity
+
+### Applied transformation
+
+We apply the log transformation followed by a first difference:
+
+$$X_t = \Delta \log Z_t = \log Z_t - \log Z_{t-1}$$
+
+where $Z_t$ is the original IPI. The series $X_t$ represents the approximate
+monthly growth rate of industrial production (in log points).
+
+```{r transformation}
+log_Y <- log(Y)          # log-level
+X     <- diff(log_Y)     # working series: Xt = Δ log(Zt)
+X_pct <- 100 * X         # expressed in percent for readability
+
+cat("Length of Xt:", length(X), "observations\n")
+```
+
+### Descriptive comparison across transformations
+
+```{r transfo-summary}
+half_stats <- function(series, label) {
+  v <- as.numeric(series); n <- length(v)
+  h1 <- v[1:floor(n/2)]; h2 <- v[(floor(n/2)+1):n]
+  data.frame(
+    Series          = label,
+    Mean            = round(mean(v),  4),
+    Std_dev         = round(sd(v),    4),
+    Mean_1st_half   = round(mean(h1), 4),
+    Mean_2nd_half   = round(mean(h2), 4),
+    Sd_1st_half     = round(sd(h1),   4),
+    Sd_2nd_half     = round(sd(h2),   4)
+  )
+}
+
+rbind(
+  half_stats(Y,     "Original index Zt"),
+  half_stats(log_Y, "Log index log(Zt)"),
+  half_stats(X,     "Delta log index Xt")
+)
+```
+
+The original index shows a large gap between the first-half mean (~110) and the
+second-half mean (~85), confirming a persistent downward drift. After the log
+and first difference, the two half-sample means are close to zero and the
+standard deviations are similar — a first indication that $X_t$ is stationary.
+
+### Formal unit-root tests — raw log-level series
+
+```{r adf-raw}
+cat("--- Augmented Dickey-Fuller test (log-level) ---\n")
+adf.test(log_Y, alternative = "stationary")
+```
+
+```{r kpss-raw}
+cat("--- KPSS test, null: level stationarity (log-level) ---\n")
+kpss.test(log_Y, null = "Level")
+
+cat("\n--- KPSS test, null: trend stationarity (log-level) ---\n")
+kpss.test(log_Y, null = "Trend")
+```
+
+**Interpretation:**
+
+- **ADF:** the unit-root null *cannot* be rejected (p-value > 0.05) — the
+  log-level series is consistent with an integrated process.
+- **KPSS (level):** level-stationarity is *strongly rejected* (p-value < 0.01).
+- **KPSS (trend):** trend-stationarity is *also rejected*, ruling out a purely
+  deterministic trend as the sole source of non-stationarity.
+
+The log-level series contains a **stochastic trend (unit root)**. Correcting a
+deterministic trend alone would not be sufficient; first differencing is the
+appropriate transformation.
+
+### Formal unit-root tests — differenced series $X_t$
+
+```{r adf-diff}
+cat("--- ADF test (Xt = Δ log Zt) ---\n")
+adf.test(X, alternative = "stationary")
+```
+
+```{r kpss-diff}
+cat("--- KPSS test, null: level stationarity (Xt) ---\n")
+kpss.test(X, null = "Level")
+```
+
+**Interpretation:**
+
+- **ADF:** the unit-root null is *strongly rejected* (p-value < 0.01) — $X_t$
+  is stationary.
+- **KPSS:** level-stationarity is *not rejected* (p-value > 0.05), confirming
+  stationarity.
+
+Both tests agree: **one differencing of the log is sufficient**. We set
+**d = 1** and do not difference further, as over-differencing would inflate the
+variance and induce unnecessary MA components in the model.
+
+---
+
+## Question 3 – Graphical representation before and after transformation
+
+### Raw series $Z_t$
+
+```{r plot-raw, fig.height=4.5}
+plot(Y,
+     main = "Industrial Production Index – Other Mining and Quarrying  [raw series Zt]",
+     ylab = "Index (base 100 = 2021)",
+     xlab = "",
+     col  = "#1F4E79",
+     lwd  = 2)
+abline(h = mean(Y), col = "#B91C1C", lty = 2, lwd = 1.5)
+legend("topright",
+       legend = c("Observed series Zt", "Sample mean"),
+       col    = c("#1F4E79", "#B91C1C"),
+       lty    = c(1, 2), lwd = c(2, 1.5), bty = "n")
+grid()
+```
+
+### Log-level series $\log Z_t$
+
+```{r plot-log, fig.height=4.5}
+plot(log_Y,
+     main = "Log of the IPI  [log(Zt)]",
+     ylab = "Log index",
+     xlab = "",
+     col  = "#7A3E9D",
+     lwd  = 2)
+grid()
+```
+
+The log transformation compresses extreme values and will make the first
+difference interpretable as a growth rate, but it does not remove the downward
+trend — this series remains non-stationary.
+
+### ACF and PACF of the log-level series
+
+```{r acf-raw, fig.height=4.5}
+par(mfrow = c(1, 2))
+acf (log_Y, lag.max = 48, main = "ACF – log-level log(Zt)")
+pacf(log_Y, lag.max = 48, main = "PACF – log-level log(Zt)")
+par(mfrow = c(1, 1))
+```
+
+The ACF decays extremely slowly and remains significant over many lags — a
+textbook signature of a unit root. The PACF cuts off sharply after lag 1,
+typical of an AR(1)-like integrated process.
+
+### Differenced series $X_t = \Delta \log Z_t$
+
+```{r plot-diff, fig.height=4.5}
+plot(X_pct,
+     main = "Stationary transformation: 100 × Δ log(Zt)  [working series Xt]",
+     ylab = "Approximate monthly growth rate (%)",
+     xlab = "",
+     col  = "#0F766E",
+     lwd  = 1.5)
+abline(h = mean(X_pct), col = "#B91C1C", lty = 2, lwd = 1.5)
+legend("topright",
+       legend = c("Xt = 100 × Δ log(Zt)", "Sample mean"),
+       col    = c("#0F766E", "#B91C1C"),
+       lty    = c(1, 2), lwd = c(1.5, 1.5), bty = "n")
+grid()
+```
+
+### ACF and PACF of the differenced series
+
+```{r acf-diff, fig.height=4.5}
+par(mfrow = c(1, 2))
+acf (X, lag.max = 36, main = "ACF – differenced series Xt")
+pacf(X, lag.max = 36, main = "PACF – differenced series Xt")
+par(mfrow = c(1, 1))
+```
+
+**Comments.** After the log-difference transformation, the series oscillates
+around zero with no visible trend. Variance is roughly stable over time, with
+slightly higher volatility around the 2008–2009 financial crisis and the 2020
+Covid-19 shock — episodic events that do not invalidate stationarity. The ACF
+of $X_t$ drops quickly to near zero, and the PACF shows only one or two
+significant spikes, consistent with a **low-order stationary ARMA process**.
+This confirms that $X_t$ is ready for ARMA modelling in Part II.
+
+---
+
+## Conclusion of Part I
+
+The selected INSEE series satisfies all assignment requirements: it is a French
+monthly aggregate IPI, seasonally and working-day adjusted, with
+**`r T` observations** and no missing values. The series contains a stochastic
+trend confirmed by ADF and KPSS tests, so we apply a log transformation
+followed by a first difference. The working series for the rest of the
+assignment is:
+
+$$\boxed{X_t = \Delta \log Z_t = \log Z_t - \log Z_{t-1}}$$
+
+This series is interpreted as the monthly growth rate of industrial production
+in the Other Mining and Quarrying sector, and its stationarity has been
+verified both graphically and through formal unit-root tests.
+
+---
+
+## Part II — ARIMA Grid Search (Box‑Jenkins)
+
+We now run a full grid search over ARMA orders using the working series `X` (the
+first-differenced log series defined above). The grid covers p = 0..5 and q = 0..2
+and uses `d = 0` because `X` is already a first difference of the log-level.
+The upper bound q = 2 is chosen because the ACF of \(X_t\) shows short-run
+spikes mainly at lags 1 and 2.
+
+```{r arima-grid, echo=TRUE}
+
+
+
+# Parameters
+p_max <- 5
+q_max <- 2
+d_ord <- 0   # X is already differenced: Δ log(Z)
+
+stopifnot(exists("X"))
+y_series <- as.numeric(X)
+
+results <- list()
+
+for (p in 0:p_max) {
+  for (q in 0:q_max) {
+    cat(sprintf("Fitting ARIMA(%d,%d,%d) on X ...\n", p, d_ord, q))
+    fit <- tryCatch({
+      stats::arima(
+        y_series,
+        order = c(p, d_ord, q),
+        include.mean = FALSE,
+        method = "ML"
+      )
+    }, error = function(e) {
+      cat("  -> error: ", conditionMessage(e), "\n")
+      return(NULL)
+    })
+    if (is.null(fit)) {
+      results[[length(results) + 1]] <- data.frame(p = p, q = q, converged = FALSE,
+                                                   last_ar_pval = NA_real_, last_ma_pval = NA_real_,
+                                                   ljung_pval = NA_real_, AIC = NA_real_, BIC = NA_real_,
+                                                   stringsAsFactors = FALSE)
+      next
+    }
+
+    coefs <- coef(fit)
+    vc <- tryCatch({ fit$var.coef }, error = function(e) NULL)
+    se <- if (!is.null(vc) && is.matrix(vc)) sqrt(diag(vc)) else rep(NA_real_, length(coefs))
+    names(se) <- names(coefs)
+
+    last_ar_pval <- NA_real_
+    if (p > 0) {
+      ar_names <- grep("^ar", names(coefs), value = TRUE)
+      if (length(ar_names) >= p) {
+        last_ar_name <- ar_names[p]
+        if (!is.na(se[last_ar_name])) {
+          tval <- coefs[last_ar_name] / se[last_ar_name]
+          last_ar_pval <- 2 * (1 - pnorm(abs(tval)))
+        }
+      }
+    }
+
+    last_ma_pval <- NA_real_
+    if (q > 0) {
+      ma_names <- grep("^ma", names(coefs), value = TRUE)
+      if (length(ma_names) >= q) {
+        last_ma_name <- ma_names[q]
+        if (!is.na(se[last_ma_name])) {
+          tval <- coefs[last_ma_name] / se[last_ma_name]
+          last_ma_pval <- 2 * (1 - pnorm(abs(tval)))
+        }
+      }
+    }
+
+    resid <- as.numeric(residuals(fit))
+    lb <- tryCatch({ stats::Box.test(resid, type = "Ljung-Box", lag = 20, fitdf = p + q) }, error = function(e) NULL)
+    ljung_pval <- if (!is.null(lb)) lb$p.value else NA_real_
+
+    aic <- AIC(fit)
+    nobs <- length(na.omit(resid))
+    bic <- if (!is.na(aic)) AIC(fit, k = log(nobs)) else NA_real_
+
+    results[[length(results) + 1]] <- data.frame(p = p, q = q, converged = TRUE,
+                                                 last_ar_pval = last_ar_pval, last_ma_pval = last_ma_pval,
+                                                 ljung_pval = ljung_pval, AIC = aic, BIC = bic,
+                                                 stringsAsFactors = FALSE)
+  }
+}
+
+res_df <- do.call(rbind, results)
+
+# A model is valid only if the highest-order AR/MA coefficients are significant.
+res_df$valid_coeffs <- with(
+  res_df,
+  (p == 0 | (!is.na(last_ar_pval) & last_ar_pval < 0.05)) &
+    (q == 0 | (!is.na(last_ma_pval) & last_ma_pval < 0.05))
+)
+
+# Residuals must behave as white noise.
+res_df$white_resid <- !is.na(res_df$ljung_pval) & res_df$ljung_pval > 0.05
+
+# Keep only valid Box-Jenkins candidates.
+valid_models <- res_df[
+  res_df$converged == TRUE &
+    res_df$valid_coeffs == TRUE &
+    res_df$white_resid == TRUE,
+]
+
+# Rank valid models by AIC.
+valid_models <- valid_models[order(valid_models$AIC), ]
+
+if (nrow(valid_models) == 0) {
+  stop("No valid model found. Relax filter criteria.")
+}
+
+write.csv(res_df, file = "arima_grid_results_X.csv", row.names = FALSE)
+write.csv(valid_models, file = "valid_arima_models_X.csv", row.names = FALSE)
+
+cat("\nTop valid models by AIC:\n")
+print(head(valid_models, 10))
+
+best_row <- valid_models[1, ]
+
+cat(sprintf(
+  "\nBest valid model by AIC: ARMA(%d,%d) on X\n",
+  best_row$p, best_row$q
+))
+
+best_fit <- stats::arima(
+  y_series,
+  order = c(best_row$p, 0, best_row$q),
+  include.mean = FALSE,
+  method = "ML"
+)
+
+print(best_fit)
+saveRDS(best_fit, file = "best_arima_X.rds")
+
+cat("\nSaved full grid, valid models, and best model.\n")
+```
+
+## Question 4 – ARMA Model Selection, Estimation and Validation
+
+The stationary series used for ARMA modelling is \(X_t = \Delta \log Z_t\).
+We estimate ARMA(p,q) models with \(p = 0,\ldots,5\) and \(q = 0,\ldots,2\).
+The final choice is made in three steps: first, the highest-order AR and MA
+coefficients must be statistically significant; second, the Ljung-Box test must
+not reject the absence of residual autocorrelation; third, among the valid
+models, we select the model with the lowest AIC.
+
+The best model among the valid candidates is an ARMA(0,2). Although ARMA(2,1)
+has a slightly lower AIC when all models are considered, it is not retained
+because its highest-order AR coefficient is not significant. The ARMA(0,2)
+model is therefore preferred because it is valid, parsimonious, and has
+white-noise residuals.
+
+The model is estimated without a constant because \(X_t\) is a log-differenced
+series with a mean close to zero, and the intercept is not significant when it
+is included. The estimated ARMA(0,2) model is:
+
+\[
+X_t = \varepsilon_t + \theta_1 \varepsilon_{t-1}
+      + \theta_2 \varepsilon_{t-2}.
+\]
+
+The estimates are:
+
+\[
+\hat{\theta}_1 = -0.4046,\qquad
+\hat{\theta}_2 = -0.3003.
+\]
+
+The residual variance is:
+
+\[
+\hat{\sigma}^2 = 0.003741.
+\]
+
+Both MA coefficients are highly significant. The Ljung-Box test at lag 20 gives
+a p-value of 0.8936, so we do not reject the null hypothesis of no residual
+autocorrelation. The residuals can therefore be considered white noise, and the
+model is valid for the stationary series \(X_t\).
+
+## Question 5 – ARIMA Representation for the Original Series
+
+Since the corrected stationary series is defined as:
+
+\[
+X_t = \Delta \log Z_t,
+\]
+
+and \(X_t\) follows an ARMA(0,2), the logarithm of the original series follows
+an ARIMA(0,1,2) model. The final model can be written as:
+
+\[
+\Delta \log Z_t
+=
+\varepsilon_t + \theta_1 \varepsilon_{t-1}
++ \theta_2 \varepsilon_{t-2},
+\]
+
+with:
+
+\[
+\hat{\theta}_1 = -0.4046,\quad
+\hat{\theta}_2 = -0.3003.
+\]
+
+Thus, the selected model for the original observed series is:
+
+\[
+\boxed{\log Z_t \sim ARIMA(0,1,2)}.
+\]
+
+---
+
+*End of Part II*
+
+---
+
+# Part III – Prediction
+
+## Question 6 – Confidence Region for Future Values
+
+Let \(T\) denote the last observation of the stationary series \(X_t\). We want
+the joint confidence region for:
+
+\[
+z =
+\begin{pmatrix}
+X_{T+1} \\
+X_{T+2}
+\end{pmatrix}.
+\]
+
+Under the retained ARMA(0,2) model and Gaussian innovations, the forecast vector
+is:
+
+\[
+\hat{z} =
+\begin{pmatrix}
+\widehat{X}_{T+1|T} \\
+\widehat{X}_{T+2|T}
+\end{pmatrix}.
+\]
+
+The confidence region of level \(\alpha\) is:
+
+\[
+(z-\hat{z})'\Sigma^{-1}(z-\hat{z}) \leq \chi^2_2(\alpha),
+\]
+
+where \(\Sigma\) is the variance-covariance matrix of the two forecast errors.
+For the retained ARMA(0,2), written without constant,
+
+\[
+X_t=\varepsilon_t+\theta_1\varepsilon_{t-1}
+      +\theta_2\varepsilon_{t-2}.
+\]
+
+At date \(T\), \(\varepsilon_T\) and \(\varepsilon_{T-1}\) are already in the
+information set. Therefore:
+
+\[
+\widehat{X}_{T+1|T}
+=\theta_1\varepsilon_T+\theta_2\varepsilon_{T-1},
+\qquad
+\widehat{X}_{T+2|T}
+=\theta_2\varepsilon_T.
+\]
+
+The corresponding forecast errors are:
+
+\[
+e_{T+1|T}=\varepsilon_{T+1},
+\qquad
+e_{T+2|T}=\varepsilon_{T+2}+\theta_1\varepsilon_{T+1}.
+\]
+
+Thus:
+
+\[
+\Sigma =
+\sigma^2
+\begin{pmatrix}
+1 & \theta_1 \\
+\theta_1 & 1+\theta_1^2
+\end{pmatrix}.
+\]
+
+The coefficient \(\theta_2\) affects the forecast center, but not this two-step
+forecast-error covariance matrix, because the term involving \(\varepsilon_T\)
+is known conditionally on the information available at time \(T\).
+
+```{r prediction-region-values}
+if (!exists("best_fit")) {
+  best_fit <- stats::arima(
+    as.numeric(X),
+    order = c(0, 0, 2),
+    include.mean = FALSE,
+    method = "ML"
+  )
+}
+
+pred_2 <- predict(best_fit, n.ahead = 2)
+
+forecast_mean <- as.numeric(pred_2$pred)
+forecast_se <- as.numeric(pred_2$se)
+
+ma_coef <- coef(best_fit)[grep("^ma", names(coef(best_fit)))]
+psi1 <- as.numeric(ma_coef[1])
+sigma2 <- best_fit$sigma2
+
+Sigma <- sigma2 * matrix(
+  c(1, psi1,
+    psi1, 1 + psi1^2),
+  nrow = 2,
+  byrow = TRUE
+)
+
+critical_95 <- qchisq(0.95, df = 2)
+
+forecast_table <- data.frame(
+  Horizon = c("T+1", "T+2"),
+  Forecast = round(forecast_mean, 6),
+  Standard_error = round(forecast_se, 6)
+)
+
+forecast_table
+Sigma
+critical_95
+```
+
+Numerically, the forecast center is approximately:
+
+\[
+\hat{z} =
+\begin{pmatrix}
+0.0195 \\
+0.0150
+\end{pmatrix},
+\qquad
+\chi^2_2(0.95)=5.991.
+\]
+
+## Question 7 – Assumptions
+
+This confidence region relies on the following assumptions: the ARMA(0,2) model
+is correctly specified for \(X_t=\Delta\log Z_t\), the residuals are white noise,
+the innovations are Gaussian, the estimated parameters are treated as known,
+and forecasts are conditional on information available up to time \(T\).
+Under these assumptions, the two forecast errors form a bivariate Gaussian
+vector, so the quadratic form follows a \(\chi^2\) distribution with two degrees
+of freedom.
+
+## Question 8 – Graphical Representation for \(\alpha=95\%\)
+
+The following code draws the 95% confidence region for
+\((X_{T+1},X_{T+2})\). The region is an ellipse centered on the two-step
+forecast mean.
+
+```{r prediction-region-plot, fig.height=5}
+theta <- seq(0, 2 * pi, length.out = 400)
+eig <- eigen(Sigma, symmetric = TRUE)
+
+ellipse <- t(sapply(theta, function(a) {
+  forecast_mean +
+    sqrt(critical_95) *
+    eig$vectors %*% diag(sqrt(eig$values), nrow = 2) %*%
+    c(cos(a), sin(a))
+}))
+
+plot(
+  ellipse[, 1], ellipse[, 2],
+  type = "l",
+  lwd = 2,
+  col = "#1F4E79",
+  xlab = expression(X[T+1]),
+  ylab = expression(X[T+2]),
+  main = "95% confidence region for future values"
+)
+points(forecast_mean[1], forecast_mean[2], pch = 19, col = "#B91C1C")
+abline(h = 0, v = 0, lty = 2, col = "grey")
+grid()
+legend(
+  "topright",
+  legend = c("95% region", "Forecast mean"),
+  col = c("#1F4E79", "#B91C1C"),
+  lwd = c(2, NA),
+  pch = c(NA, 19),
+  bty = "n"
+)
+```
+
+The ellipse is centered around \((0.0195,0.0150)\). Its tilted shape reflects
+the covariance between the one-step and two-step forecast errors, which comes
+from the moving-average structure of the retained ARMA(0,2) model.
+
+## Question 9 – Additional Information from Another Stationary Series
+
+Suppose another stationary series \(Y_t\) is observed from \(t=1\) to \(T\), and
+that \(Y_{T+1}\) is available before \(X_{T+1}\). This information improves the
+prediction of \(X_{T+1}\) only if it contains information about the next
+innovation of \(X_t\), beyond what is already known at time \(T\). Formally, if
+\(\mathcal{I}_T\) is the information set at time \(T\), \(Y_{T+1}\) is useful
+when:
+
+\[
+E(X_{T+1}\mid \mathcal{I}_T,Y_{T+1})
+\neq
+E(X_{T+1}\mid \mathcal{I}_T).
+\]
+
+For the one-step prediction, this is equivalent to requiring a contemporaneous
+link with the innovation of \(X_t\):
+
+\[
+\operatorname{Cov}(Y_{T+1},\varepsilon_{T+1}) \neq 0
+\]
+
+more precisely after removing the part of \(Y_{T+1}\) predictable from
+\(\mathcal{I}_T\). It can be tested by estimating an ARIMAX/transfer model for
+\(X_t\) including \(Y_t\), or by first extracting the innovation of \(Y_t\) and
+testing whether it is significant in a regression of the innovation of \(X_t\).
+A significant coefficient, together with white-noise residuals and improved
+out-of-sample forecasts, would show that the faster availability of \(Y_{T+1}\)
+improves the prediction of \(X_{T+1}\). Granger causality based only on past
+values of \(Y_t\) is related, but the key condition here is this contemporaneous
+correlation with the next innovation of \(X_t\).
+
+---
+
+*End of Part III*
